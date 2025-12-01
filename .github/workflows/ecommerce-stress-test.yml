@@ -5,7 +5,8 @@
 # Black Friday simulations, and inventory race condition detection.
 #
 # Required Secrets:
-#   - API_BASE_URL: Base URL for e-commerce API
+#   - API_ENDPOINT: Full API endpoint URL (e.g., https://api.example.com/api/products)
+#                   Base URL will be extracted automatically
 #   - API_KEY: (Optional) Authentication token
 #
 # Scenarios:
@@ -84,22 +85,33 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       api_available: ${{ steps.check.outputs.available }}
+      api_base_url: ${{ steps.extract.outputs.base_url }}
 
     steps:
       - name: Validate secrets
         run: |
-          if [ -z "${{ secrets.API_BASE_URL }}" ]; then
-            echo "::error::API_BASE_URL secret is not configured"
+          if [ -z "${{ secrets.API_ENDPOINT }}" ]; then
+            echo "::error::API_ENDPOINT secret is not configured"
             exit 1
           fi
+
+      - name: Extract base URL from endpoint
+        id: extract
+        run: |
+          # Extract base URL from full endpoint (e.g., http://localhost:8000/api/products -> http://localhost:8000)
+          FULL_URL="${{ secrets.API_ENDPOINT }}"
+          BASE_URL=$(echo "$FULL_URL" | sed -E 's|(https?://[^/]+).*|\1|')
+          echo "base_url=$BASE_URL" >> $GITHUB_OUTPUT
+          echo "Extracted base URL: $BASE_URL from $FULL_URL"
 
       - name: Check API availability
         id: check
         run: |
+          BASE_URL="${{ steps.extract.outputs.base_url }}"
           # Quick health check
           STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
             --connect-timeout 10 \
-            "${{ secrets.API_BASE_URL }}/health" || echo "000")
+            "${BASE_URL}/health" || echo "000")
 
           if [ "$STATUS" = "200" ] || [ "$STATUS" = "404" ]; then
             echo "available=true" >> $GITHUB_OUTPUT
@@ -150,7 +162,7 @@ jobs:
             USERS="${{ github.event.inputs.users || '50' }}"
 
             python ecommerce_stress_test.py \
-              --base-url "${{ secrets.API_BASE_URL }}" \
+              --base-url "${{ needs.preflight.outputs.api_base_url }}" \
               --scenario normal \
               --duration $DURATION \
               --users $USERS \
@@ -199,7 +211,7 @@ jobs:
             mkdir -p reports
 
             python ecommerce_stress_test.py \
-              --base-url "${{ secrets.API_BASE_URL }}" \
+              --base-url "${{ needs.preflight.outputs.api_base_url }}" \
               --scenario flash-sale \
               --duration 60 \
               --users 500 \
@@ -250,7 +262,7 @@ jobs:
             DURATION="${{ github.event.inputs.duration || '300' }}"
 
             python ecommerce_stress_test.py \
-              --base-url "${{ secrets.API_BASE_URL }}" \
+              --base-url "${{ needs.preflight.outputs.api_base_url }}" \
               --scenario black-friday \
               --duration $DURATION \
               --users 500 \
@@ -299,7 +311,7 @@ jobs:
             mkdir -p reports
 
             python ecommerce_stress_test.py \
-              --base-url "${{ secrets.API_BASE_URL }}" \
+              --base-url "${{ needs.preflight.outputs.api_base_url }}" \
               --scenario race-condition \
               --users 500 \
               --concurrency 500 \
@@ -366,7 +378,7 @@ jobs:
             mkdir -p reports
 
             python ecommerce_stress_test.py \
-              --base-url "${{ secrets.API_BASE_URL }}" \
+              --base-url "${{ needs.preflight.outputs.api_base_url }}" \
               --scenario mixed-workload \
               --duration 120 \
               --users 300 \
@@ -415,7 +427,7 @@ jobs:
             mkdir -p reports
 
             python ecommerce_stress_test.py \
-              --base-url "${{ secrets.API_BASE_URL }}" \
+              --base-url "${{ needs.preflight.outputs.api_base_url }}" \
               --scenario checkout-stress \
               --users 300 \
               --concurrency 300 \
