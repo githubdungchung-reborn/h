@@ -9,3 +9,6 @@ rich>=13.7.0
 
 # For async file operations (optional)
 aiofiles>=23.2.1
+
+# For generating fake user data (e-commerce testing)
+faker>=22.0.0

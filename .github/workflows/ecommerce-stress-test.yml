@@ -1,0 +1,622 @@
+# =============================================================================
+# E-Commerce Stress Test Suite - GitHub Actions Workflow
+# =============================================================================
+# Comprehensive e-commerce testing with user journeys, flash sales,
+# Black Friday simulations, and inventory race condition detection.
+#
+# Required Secrets:
+#   - API_BASE_URL: Base URL for e-commerce API
+#   - API_KEY: (Optional) Authentication token
+#
+# Scenarios:
+#   - Normal traffic with realistic user distribution
+#   - Flash sale spike testing
+#   - Black Friday sustained high traffic
+#   - Inventory race condition detection
+#   - Checkout flow stress testing
+#   - Mixed read/write workload
+# =============================================================================
+
+name: E-Commerce Stress Test Suite
+
+on:
+  # Run every 15 minutes (staggered)
+  schedule:
+    - cron: '3,18,33,48 * * * *'
+
+  # Manual trigger with scenario selection
+  workflow_dispatch:
+    inputs:
+      scenario:
+        description: 'Test scenario'
+        required: true
+        default: 'normal'
+        type: choice
+        options:
+          - normal
+          - flash-sale
+          - black-friday
+          - race-condition
+          - mixed-workload
+          - checkout-stress
+          - full-suite
+      duration:
+        description: 'Test duration (seconds)'
+        required: false
+        default: '120'
+      users:
+        description: 'Users/concurrency level'
+        required: false
+        default: '100'
+      intensity:
+        description: 'Test intensity'
+        required: false
+        default: 'medium'
+        type: choice
+        options:
+          - light
+          - medium
+          - heavy
+          - extreme
+
+  # Run on pushes to main
+  push:
+    branches:
+      - main
+    paths:
+      - 'ecommerce_stress_test.py'
+      - '.github/workflows/ecommerce-stress-test.yml'
+
+concurrency:
+  group: ecommerce-stress-test-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  PYTHON_VERSION: '3.11'
+  MAX_RETRY_ATTEMPTS: 5
+
+jobs:
+  # ===========================================================================
+  # Pre-flight Checks
+  # ===========================================================================
+  preflight:
+    name: Pre-flight Validation
+    runs-on: ubuntu-latest
+    outputs:
+      api_available: ${{ steps.check.outputs.available }}
+
+    steps:
+      - name: Validate secrets
+        run: |
+          if [ -z "${{ secrets.API_BASE_URL }}" ]; then
+            echo "::error::API_BASE_URL secret is not configured"
+            exit 1
+          fi
+
+      - name: Check API availability
+        id: check
+        run: |
+          # Quick health check
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            --connect-timeout 10 \
+            "${{ secrets.API_BASE_URL }}/health" || echo "000")
+
+          if [ "$STATUS" = "200" ] || [ "$STATUS" = "404" ]; then
+            echo "available=true" >> $GITHUB_OUTPUT
+            echo "API is reachable (status: $STATUS)"
+          else
+            echo "available=false" >> $GITHUB_OUTPUT
+            echo "::warning::API may not be available (status: $STATUS)"
+          fi
+
+  # ===========================================================================
+  # Normal Traffic Test
+  # ===========================================================================
+  normal-traffic:
+    name: Normal Traffic Simulation
+    runs-on: ubuntu-latest
+    needs: preflight
+    if: |
+      github.event.inputs.scenario == 'normal' ||
+      github.event.inputs.scenario == 'full-suite' ||
+      github.event_name == 'schedule'
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install aiohttp rich faker
+
+      - name: Run normal traffic test
+        id: test
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 15
+          max_attempts: ${{ env.MAX_RETRY_ATTEMPTS }}
+          retry_wait_seconds: 30
+          command: |
+            mkdir -p reports
+
+            DURATION="${{ github.event.inputs.duration || '120' }}"
+            USERS="${{ github.event.inputs.users || '50' }}"
+
+            python ecommerce_stress_test.py \
+              --base-url "${{ secrets.API_BASE_URL }}" \
+              --scenario normal \
+              --duration $DURATION \
+              --users $USERS \
+              --concurrency 100 \
+              --output reports/normal_traffic_results.json
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: normal-traffic-results
+          path: reports/
+          retention-days: 14
+
+  # ===========================================================================
+  # Flash Sale Test
+  # ===========================================================================
+  flash-sale:
+    name: Flash Sale Simulation
+    runs-on: ubuntu-latest
+    needs: preflight
+    if: |
+      github.event.inputs.scenario == 'flash-sale' ||
+      github.event.inputs.scenario == 'full-suite'
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install aiohttp rich faker
+
+      - name: Run flash sale test
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 15
+          max_attempts: ${{ env.MAX_RETRY_ATTEMPTS }}
+          retry_wait_seconds: 30
+          command: |
+            mkdir -p reports
+
+            python ecommerce_stress_test.py \
+              --base-url "${{ secrets.API_BASE_URL }}" \
+              --scenario flash-sale \
+              --duration 60 \
+              --users 500 \
+              --concurrency 500 \
+              --output reports/flash_sale_results.json
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: flash-sale-results
+          path: reports/
+          retention-days: 14
+
+  # ===========================================================================
+  # Black Friday Test
+  # ===========================================================================
+  black-friday:
+    name: Black Friday Simulation
+    runs-on: ubuntu-latest
+    needs: preflight
+    if: |
+      github.event.inputs.scenario == 'black-friday' ||
+      github.event.inputs.scenario == 'full-suite'
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install aiohttp rich faker
+
+      - name: Run Black Friday test
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 25
+          max_attempts: 3
+          retry_wait_seconds: 60
+          command: |
+            mkdir -p reports
+
+            DURATION="${{ github.event.inputs.duration || '300' }}"
+
+            python ecommerce_stress_test.py \
+              --base-url "${{ secrets.API_BASE_URL }}" \
+              --scenario black-friday \
+              --duration $DURATION \
+              --users 500 \
+              --concurrency 1000 \
+              --output reports/black_friday_results.json
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: black-friday-results
+          path: reports/
+          retention-days: 14
+
+  # ===========================================================================
+  # Inventory Race Condition Test
+  # ===========================================================================
+  race-condition:
+    name: Inventory Race Condition Test
+    runs-on: ubuntu-latest
+    needs: preflight
+    if: |
+      github.event.inputs.scenario == 'race-condition' ||
+      github.event.inputs.scenario == 'full-suite'
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install aiohttp rich faker
+
+      - name: Run race condition test
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 10
+          max_attempts: ${{ env.MAX_RETRY_ATTEMPTS }}
+          retry_wait_seconds: 20
+          command: |
+            mkdir -p reports
+
+            python ecommerce_stress_test.py \
+              --base-url "${{ secrets.API_BASE_URL }}" \
+              --scenario race-condition \
+              --users 500 \
+              --concurrency 500 \
+              --output reports/race_condition_results.json
+
+      - name: Check for overselling
+        if: always()
+        run: |
+          if [ -f reports/race_condition_results.json ]; then
+            CONFLICTS=$(jq -r '.inventory.conflicts // 0' reports/race_condition_results.json)
+            ORDERS=$(jq -r '.funnel.orders_completed // 0' reports/race_condition_results.json)
+
+            echo "### Race Condition Results" >> $GITHUB_STEP_SUMMARY
+            echo "| Metric | Value |" >> $GITHUB_STEP_SUMMARY
+            echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
+            echo "| Orders Completed | $ORDERS |" >> $GITHUB_STEP_SUMMARY
+            echo "| Inventory Conflicts | $CONFLICTS |" >> $GITHUB_STEP_SUMMARY
+
+            if [ "$CONFLICTS" -gt 0 ]; then
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "⚠️ **Warning**: Inventory conflicts were detected!" >> $GITHUB_STEP_SUMMARY
+            fi
+          fi
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: race-condition-results
+          path: reports/
+          retention-days: 14
+
+  # ===========================================================================
+  # Mixed Workload Test
+  # ===========================================================================
+  mixed-workload:
+    name: Mixed Workload Test
+    runs-on: ubuntu-latest
+    needs: preflight
+    if: |
+      github.event.inputs.scenario == 'mixed-workload' ||
+      github.event.inputs.scenario == 'full-suite'
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install aiohttp rich faker
+
+      - name: Run mixed workload test
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 15
+          max_attempts: ${{ env.MAX_RETRY_ATTEMPTS }}
+          retry_wait_seconds: 30
+          command: |
+            mkdir -p reports
+
+            python ecommerce_stress_test.py \
+              --base-url "${{ secrets.API_BASE_URL }}" \
+              --scenario mixed-workload \
+              --duration 120 \
+              --users 300 \
+              --concurrency 200 \
+              --output reports/mixed_workload_results.json
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mixed-workload-results
+          path: reports/
+          retention-days: 14
+
+  # ===========================================================================
+  # Checkout Stress Test
+  # ===========================================================================
+  checkout-stress:
+    name: Checkout Flow Stress Test
+    runs-on: ubuntu-latest
+    needs: preflight
+    if: |
+      github.event.inputs.scenario == 'checkout-stress' ||
+      github.event.inputs.scenario == 'full-suite'
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install aiohttp rich faker
+
+      - name: Run checkout stress test
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 10
+          max_attempts: ${{ env.MAX_RETRY_ATTEMPTS }}
+          retry_wait_seconds: 20
+          command: |
+            mkdir -p reports
+
+            python ecommerce_stress_test.py \
+              --base-url "${{ secrets.API_BASE_URL }}" \
+              --scenario checkout-stress \
+              --users 300 \
+              --concurrency 300 \
+              --output reports/checkout_stress_results.json
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: checkout-stress-results
+          path: reports/
+          retention-days: 14
+
+  # ===========================================================================
+  # Aggregate Results and Report
+  # ===========================================================================
+  aggregate-report:
+    name: Generate Comprehensive Report
+    runs-on: ubuntu-latest
+    needs:
+      - normal-traffic
+      - flash-sale
+      - black-friday
+      - race-condition
+      - mixed-workload
+      - checkout-stress
+    if: always()
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: all-results
+
+      - name: Generate summary report
+        run: |
+          echo "# 🛒 E-Commerce Stress Test Report" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Run ID**: ${{ github.run_id }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Timestamp**: $(date -u +'%Y-%m-%d %H:%M:%S UTC')" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          echo "## Test Results Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Scenario | Status | Total Requests | Success Rate | Conversion | Avg Latency |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|--------|----------------|--------------|------------|-------------|" >> $GITHUB_STEP_SUMMARY
+
+          for dir in all-results/*/; do
+            SCENARIO=$(basename "$dir" | sed 's/-results$//')
+
+            # Find the JSON file
+            JSON_FILE=$(find "$dir" -name "*.json" -type f | head -1)
+
+            if [ -n "$JSON_FILE" ] && [ -f "$JSON_FILE" ]; then
+              TOTAL=$(jq -r '.summary.total_requests // 0' "$JSON_FILE")
+              SUCCESS=$(jq -r '.summary.successful_requests // 0' "$JSON_FILE")
+              RATE=$(echo "scale=1; $SUCCESS * 100 / $TOTAL" | bc 2>/dev/null || echo "0")
+              CONVERSION=$(jq -r '.funnel.conversion_rate_percent // 0' "$JSON_FILE")
+              AVG_LAT=$(jq -r '.latency_ms.average // 0' "$JSON_FILE")
+
+              if [ "$RATE" != "0" ] && [ $(echo "$RATE >= 95" | bc -l) -eq 1 ]; then
+                STATUS="✅ Pass"
+              else
+                STATUS="❌ Fail"
+              fi
+
+              echo "| $SCENARIO | $STATUS | $TOTAL | ${RATE}% | ${CONVERSION}% | ${AVG_LAT}ms |" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "| $SCENARIO | ⚠️ No Data | - | - | - | - |" >> $GITHUB_STEP_SUMMARY
+            fi
+          done
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## Funnel Analysis" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # Find the normal traffic results for funnel analysis
+          NORMAL_JSON=$(find all-results -name "normal_traffic_results.json" -type f | head -1)
+
+          if [ -n "$NORMAL_JSON" ] && [ -f "$NORMAL_JSON" ]; then
+            HOMEPAGE=$(jq -r '.funnel.homepage_visits // 0' "$NORMAL_JSON")
+            VIEWS=$(jq -r '.funnel.product_views // 0' "$NORMAL_JSON")
+            CART=$(jq -r '.funnel.add_to_cart // 0' "$NORMAL_JSON")
+            CHECKOUT=$(jq -r '.funnel.checkout_starts // 0' "$NORMAL_JSON")
+            ORDERS=$(jq -r '.funnel.orders_completed // 0' "$NORMAL_JSON")
+            ABANDON=$(jq -r '.funnel.cart_abandonment_rate_percent // 0' "$NORMAL_JSON")
+
+            echo "```" >> $GITHUB_STEP_SUMMARY
+            echo "Homepage Visits  : $HOMEPAGE" >> $GITHUB_STEP_SUMMARY
+            echo "       ↓" >> $GITHUB_STEP_SUMMARY
+            echo "Product Views    : $VIEWS" >> $GITHUB_STEP_SUMMARY
+            echo "       ↓" >> $GITHUB_STEP_SUMMARY
+            echo "Add to Cart      : $CART" >> $GITHUB_STEP_SUMMARY
+            echo "       ↓" >> $GITHUB_STEP_SUMMARY
+            echo "Checkout Starts  : $CHECKOUT" >> $GITHUB_STEP_SUMMARY
+            echo "       ↓" >> $GITHUB_STEP_SUMMARY
+            echo "Orders Completed : $ORDERS" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "Cart Abandonment Rate: ${ABANDON}%" >> $GITHUB_STEP_SUMMARY
+            echo "```" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Merge all results
+        run: |
+          mkdir -p final-report
+
+          # Combine all JSON results
+          echo '{"scenarios": {}}' > final-report/comprehensive_report.json
+
+          for dir in all-results/*/; do
+            SCENARIO=$(basename "$dir" | sed 's/-results$//')
+            JSON_FILE=$(find "$dir" -name "*.json" -type f | head -1)
+
+            if [ -n "$JSON_FILE" ] && [ -f "$JSON_FILE" ]; then
+              jq --arg name "$SCENARIO" --slurpfile data "$JSON_FILE" \
+                '.scenarios[$name] = $data[0]' final-report/comprehensive_report.json > /tmp/temp.json
+              mv /tmp/temp.json final-report/comprehensive_report.json
+            fi
+          done
+
+          # Add metadata
+          jq --arg ts "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
+             --arg run "${{ github.run_id }}" \
+             '. + {timestamp: $ts, run_id: $run}' \
+             final-report/comprehensive_report.json > /tmp/temp.json
+          mv /tmp/temp.json final-report/comprehensive_report.json
+
+      - name: Upload comprehensive report
+        uses: actions/upload-artifact@v4
+        with:
+          name: ecommerce-comprehensive-report-${{ github.run_id }}
+          path: final-report/
+          retention-days: 30
+
+  # ===========================================================================
+  # Alert on Critical Failures
+  # ===========================================================================
+  alert-failures:
+    name: Alert on Failures
+    runs-on: ubuntu-latest
+    needs: aggregate-report
+    if: failure() && github.event_name == 'schedule'
+
+    steps:
+      - name: Create failure issue
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const title = `🚨 E-Commerce Stress Test Failed - ${new Date().toISOString().split('T')[0]}`;
+            const body = `
+            ## E-Commerce Stress Test Failure
+
+            One or more e-commerce stress test scenarios have failed.
+
+            ### Details
+            - **Run ID**: ${context.runId}
+            - **Timestamp**: ${new Date().toISOString()}
+
+            ### Failed Scenarios
+            Check the [workflow run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}) for details.
+
+            ### Potential Issues
+            - API performance degradation
+            - Inventory race conditions
+            - Checkout flow failures
+            - Payment gateway issues
+
+            ### Recommended Actions
+            1. Review the test artifacts for detailed metrics
+            2. Check API health and error logs
+            3. Verify database performance
+            4. Check payment gateway status
+
+            ---
+            *Auto-generated by E-Commerce Stress Test Suite*
+            `;
+
+            // Check for existing issue today
+            const today = new Date().toISOString().split('T')[0];
+            const issues = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'ecommerce-stress-test,failure'
+            });
+
+            const existingIssue = issues.data.find(i => i.title.includes(today));
+
+            if (existingIssue) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: existingIssue.number,
+                body: `## Additional Failure at ${new Date().toISOString()}\n\n${body}`
+              });
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: title,
+                body: body,
+                labels: ['ecommerce-stress-test', 'failure', 'automated']
+              });
+            }
