@@ -1,0 +1,345 @@
+# =============================================================================
+# EXTREME SCALE STRESS TEST WORKFLOW
+# =============================================================================
+# Runs extreme stress tests (1M, 10M, 100M+ requests)
+# Designed for periodic load testing and capacity planning
+#
+# Note: These tests can be resource-intensive and should only run against
+# properly scaled infrastructure or staging environments.
+# =============================================================================
+
+name: Extreme Scale Stress Test
+
+on:
+  # Manual trigger with options
+  workflow_dispatch:
+    inputs:
+      preset:
+        description: 'Stress test preset'
+        required: true
+        type: choice
+        options:
+          - '100K'
+          - '500K'
+          - '1M'
+          - '5M'
+          - '10M'
+          - '50M'
+          - '100M'
+          - 'max-1min'
+          - 'max-5min'
+          - 'max-10min'
+          - '10k-rps'
+          - '50k-rps'
+          - '100k-rps'
+        default: '1M'
+
+      custom_requests:
+        description: 'Custom request count (overrides preset)'
+        required: false
+        type: string
+        default: ''
+
+      custom_concurrency:
+        description: 'Custom concurrency level'
+        required: false
+        type: string
+        default: ''
+
+      custom_duration:
+        description: 'Custom duration in seconds'
+        required: false
+        type: string
+        default: ''
+
+  # Scheduled runs - daily at 3 AM UTC for capacity testing
+  schedule:
+    - cron: '0 3 * * *'  # Daily 1M test
+    - cron: '0 3 * * 0'  # Weekly 10M test (Sundays)
+
+env:
+  PYTHON_VERSION: '3.11'
+
+jobs:
+  # ===========================================================================
+  # EXTREME STRESS TEST JOB
+  # ===========================================================================
+  extreme-stress-test:
+    name: Extreme Stress Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 180  # 3 hours max for very long tests
+
+    steps:
+      # -----------------------------------------------------------------------
+      # Setup
+      # -----------------------------------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install uvloop || echo "uvloop not available, continuing without it"
+
+      - name: System info
+        run: |
+          echo "=== System Information ==="
+          echo "CPU cores: $(nproc)"
+          echo "Memory: $(free -h | grep Mem | awk '{print $2}')"
+          echo "ulimit -n: $(ulimit -n)"
+
+          # Increase file descriptor limits
+          ulimit -n 65535 || echo "Could not increase ulimit"
+
+          # Check Python async performance
+          python -c "
+          import sys
+          print(f'Python version: {sys.version}')
+          try:
+              import uvloop
+              print('uvloop: AVAILABLE (2x faster)')
+          except ImportError:
+              print('uvloop: NOT AVAILABLE')
+          "
+
+      # -----------------------------------------------------------------------
+      # Determine preset
+      # -----------------------------------------------------------------------
+      - name: Determine test configuration
+        id: config
+        run: |
+          # Default to 1M for scheduled runs
+          PRESET="${{ github.event.inputs.preset || '1M' }}"
+
+          # Check if this is a weekly run (Sunday) for 10M test
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            DAY_OF_WEEK=$(date +%u)
+            if [ "$DAY_OF_WEEK" = "7" ]; then
+              PRESET="10M"
+              echo "Weekly 10M stress test"
+            else
+              PRESET="1M"
+              echo "Daily 1M stress test"
+            fi
+          fi
+
+          echo "preset=$PRESET" >> $GITHUB_OUTPUT
+          echo "Using preset: $PRESET"
+
+      # -----------------------------------------------------------------------
+      # Run stress test with retry
+      # -----------------------------------------------------------------------
+      - name: Run extreme stress test
+        id: stress_test
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 120
+          max_attempts: 3
+          retry_wait_seconds: 30
+          command: |
+            PRESET="${{ steps.config.outputs.preset }}"
+            ENDPOINT="${{ secrets.API_ENDPOINT }}"
+
+            # Fallback to localhost if no secret
+            if [ -z "$ENDPOINT" ]; then
+              echo "No API_ENDPOINT secret, using localhost for demo"
+              ENDPOINT="http://localhost:8000/api/products"
+            fi
+
+            # Build command
+            CMD="python extreme_stress_test.py --url $ENDPOINT"
+
+            # Check for custom overrides
+            if [ -n "${{ github.event.inputs.custom_requests }}" ]; then
+              CMD="$CMD --requests ${{ github.event.inputs.custom_requests }}"
+              if [ -n "${{ github.event.inputs.custom_concurrency }}" ]; then
+                CMD="$CMD --concurrency ${{ github.event.inputs.custom_concurrency }}"
+              fi
+            elif [ -n "${{ github.event.inputs.custom_duration }}" ]; then
+              CMD="$CMD --duration ${{ github.event.inputs.custom_duration }}"
+              if [ -n "${{ github.event.inputs.custom_concurrency }}" ]; then
+                CMD="$CMD --concurrency ${{ github.event.inputs.custom_concurrency }}"
+              fi
+            else
+              CMD="$CMD --preset $PRESET"
+            fi
+
+            CMD="$CMD --output extreme_stress_report.json"
+
+            echo "Running: $CMD"
+            $CMD
+
+      # -----------------------------------------------------------------------
+      # Upload results
+      # -----------------------------------------------------------------------
+      - name: Upload stress test report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: extreme-stress-report-${{ steps.config.outputs.preset }}-${{ github.run_number }}
+          path: |
+            extreme_stress_report.json
+          retention-days: 90
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## Extreme Stress Test Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          if [ -f extreme_stress_report.json ]; then
+            echo "### Test Configuration" >> $GITHUB_STEP_SUMMARY
+            echo "- Preset: ${{ steps.config.outputs.preset }}" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+
+            echo "### Key Metrics" >> $GITHUB_STEP_SUMMARY
+            echo '```json' >> $GITHUB_STEP_SUMMARY
+            cat extreme_stress_report.json | python -c "
+          import sys, json
+          data = json.load(sys.stdin)
+          summary = data.get('summary', {})
+          print(json.dumps({
+              'total_requests': summary.get('total_requests'),
+              'successful_requests': summary.get('successful_requests'),
+              'failed_requests': summary.get('failed_requests'),
+              'requests_per_second': round(summary.get('requests_per_second', 0), 2),
+              'success_rate': f\"{summary.get('success_rate', 0):.2f}%\",
+              'avg_latency_ms': round(summary.get('avg_latency_ms', 0), 2),
+              'p99_latency_ms': round(summary.get('p99_latency_ms', 0), 2),
+              'duration_seconds': round(summary.get('duration_seconds', 0), 2),
+          }, indent=2))
+          "
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          else
+            echo "No report file generated" >> $GITHUB_STEP_SUMMARY
+          fi
+
+  # ===========================================================================
+  # PROGRESSIVE LOAD TEST (Weekly comprehensive test)
+  # ===========================================================================
+  progressive-load-test:
+    name: Progressive Load Test
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.preset == ''
+    timeout-minutes: 240
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install uvloop || echo "uvloop not available"
+          ulimit -n 65535 || true
+
+      - name: Progressive load test (100K -> 1M -> 10M)
+        run: |
+          ENDPOINT="${{ secrets.API_ENDPOINT }}"
+          if [ -z "$ENDPOINT" ]; then
+            ENDPOINT="http://localhost:8000/api/products"
+          fi
+
+          echo "=== Phase 1: 100K Warmup ==="
+          python extreme_stress_test.py --url $ENDPOINT --preset 100K --output report_100k.json || true
+          sleep 30
+
+          echo "=== Phase 2: 1M Load ==="
+          python extreme_stress_test.py --url $ENDPOINT --preset 1M --output report_1m.json || true
+          sleep 60
+
+          echo "=== Phase 3: 10M Stress ==="
+          python extreme_stress_test.py --url $ENDPOINT --preset 10M --output report_10m.json || true
+
+      - name: Upload progressive test reports
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: progressive-load-reports-${{ github.run_number }}
+          path: |
+            report_*.json
+          retention-days: 90
+
+  # ===========================================================================
+  # RPS DISCOVERY TEST
+  # ===========================================================================
+  rps-discovery:
+    name: RPS Discovery Test
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch'
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Find maximum sustainable RPS
+        run: |
+          ENDPOINT="${{ secrets.API_ENDPOINT }}"
+          if [ -z "$ENDPOINT" ]; then
+            ENDPOINT="http://localhost:8000/api/products"
+          fi
+
+          echo "Testing sustainable RPS levels..."
+
+          # Test 10K RPS
+          echo "=== Testing 10K RPS ==="
+          timeout 120 python extreme_stress_test.py --url $ENDPOINT --preset 10k-rps --output rps_10k.json || true
+
+          # Test 50K RPS
+          echo "=== Testing 50K RPS ==="
+          timeout 120 python extreme_stress_test.py --url $ENDPOINT --preset 50k-rps --output rps_50k.json || true
+
+          # Analyze results
+          python -c "
+          import json, os
+          results = []
+          for f in ['rps_10k.json', 'rps_50k.json']:
+              if os.path.exists(f):
+                  with open(f) as fp:
+                      data = json.load(fp)
+                      summary = data.get('summary', {})
+                      results.append({
+                          'test': f,
+                          'actual_rps': summary.get('requests_per_second', 0),
+                          'success_rate': summary.get('success_rate', 0),
+                          'p99_latency': summary.get('p99_latency_ms', 0)
+                      })
+          print('RPS Discovery Results:')
+          for r in results:
+              print(f\"  {r['test']}: {r['actual_rps']:.0f} RPS, {r['success_rate']:.1f}% success, p99={r['p99_latency']:.0f}ms\")
+          "
+
+      - name: Upload RPS discovery reports
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: rps-discovery-${{ github.run_number }}
+          path: |
+            rps_*.json
+          retention-days: 30

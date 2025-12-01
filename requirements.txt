@@ -12,3 +12,6 @@ aiofiles>=23.2.1
 
 # For generating fake user data (e-commerce testing)
 faker>=22.0.0
+
+# Performance boost for Linux (optional, ~2x faster async)
+uvloop>=0.19.0; sys_platform != "win32"
