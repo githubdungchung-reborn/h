@@ -78,48 +78,21 @@ env:
 
 jobs:
   # ===========================================================================
-  # Pre-flight Checks
+  # Pre-flight: Extract Base URL
   # ===========================================================================
   preflight:
-    name: Pre-flight Validation
+    name: Setup
     runs-on: ubuntu-latest
     outputs:
-      api_available: ${{ steps.check.outputs.available }}
       api_base_url: ${{ steps.extract.outputs.base_url }}
 
     steps:
-      - name: Validate secrets
-        run: |
-          if [ -z "${{ secrets.API_ENDPOINT }}" ]; then
-            echo "::error::API_ENDPOINT secret is not configured"
-            exit 1
-          fi
-
-      - name: Extract base URL from endpoint
+      - name: Extract base URL
         id: extract
         run: |
-          # Extract base URL from full endpoint (e.g., http://localhost:8000/api/products -> http://localhost:8000)
           FULL_URL="${{ secrets.API_ENDPOINT }}"
           BASE_URL=$(echo "$FULL_URL" | sed -E 's|(https?://[^/]+).*|\1|')
           echo "base_url=$BASE_URL" >> $GITHUB_OUTPUT
-          echo "Extracted base URL: $BASE_URL from $FULL_URL"
-
-      - name: Check API availability
-        id: check
-        run: |
-          BASE_URL="${{ steps.extract.outputs.base_url }}"
-          # Quick health check
-          STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
-            --connect-timeout 10 \
-            "${BASE_URL}/health" || echo "000")
-
-          if [ "$STATUS" = "200" ] || [ "$STATUS" = "404" ]; then
-            echo "available=true" >> $GITHUB_OUTPUT
-            echo "API is reachable (status: $STATUS)"
-          else
-            echo "available=false" >> $GITHUB_OUTPUT
-            echo "::warning::API may not be available (status: $STATUS)"
-          fi
 
   # ===========================================================================
   # Normal Traffic Test

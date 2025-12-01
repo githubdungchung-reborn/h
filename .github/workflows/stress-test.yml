@@ -108,20 +108,6 @@ jobs:
           python -m pip install --upgrade pip
           pip install aiohttp rich
 
-      # -----------------------------------------------------------------------
-      # Step 4: Validate API endpoint secret
-      # -----------------------------------------------------------------------
-      - name: Validate API endpoint
-        run: |
-          if [ -z "${{ secrets.API_ENDPOINT }}" ]; then
-            echo "::error::API_ENDPOINT secret is not set. Please configure it in repository settings."
-            exit 1
-          fi
-          echo "API endpoint configured: $(echo '${{ secrets.API_ENDPOINT }}' | sed 's/\(https\?:\/\/[^\/]*\).*/\1\/.../')"
-
-      # -----------------------------------------------------------------------
-      # Step 5: Create reports directory
-      # -----------------------------------------------------------------------
       - name: Create reports directory
         run: mkdir -p reports
 
@@ -142,15 +128,6 @@ jobs:
             REQUESTS="${{ github.event.inputs.requests || '5000' }}"
             CONCURRENCY="${{ github.event.inputs.concurrency || '100' }}"
             DURATION="${{ github.event.inputs.duration || '60' }}"
-
-            echo "========================================"
-            echo "Running Stress Test"
-            echo "========================================"
-            echo "Scenario: $SCENARIO"
-            echo "Requests: $REQUESTS"
-            echo "Concurrency: $CONCURRENCY"
-            echo "Duration: $DURATION"
-            echo "========================================"
 
             # Build command based on scenario
             CMD="python stress_test.py \
