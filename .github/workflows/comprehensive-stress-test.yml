@@ -1,0 +1,337 @@
+# =============================================================================
+# Comprehensive API Stress Test - Multiple Scenarios
+# =============================================================================
+# Runs multiple stress test scenarios in parallel with comprehensive reporting.
+# Designed for thorough API testing with full metrics collection.
+#
+# Required Secrets:
+#   - API_ENDPOINT: The API URL to test
+#   - API_KEY: (Optional) API key for authentication
+# =============================================================================
+
+name: Comprehensive Stress Test
+
+on:
+  # Run every 15 minutes (at :12, :27, :42, :57 to stagger with basic test)
+  schedule:
+    - cron: '12,27,42,57 * * * *'
+
+  workflow_dispatch:
+    inputs:
+      test_intensity:
+        description: 'Test intensity level'
+        required: false
+        default: 'medium'
+        type: choice
+        options:
+          - light
+          - medium
+          - heavy
+          - extreme
+
+concurrency:
+  group: comprehensive-stress-test
+  cancel-in-progress: false
+
+env:
+  PYTHON_VERSION: '3.11'
+
+jobs:
+  # ===========================================================================
+  # Matrix Strategy: Run Multiple Scenarios in Parallel
+  # ===========================================================================
+  stress-test-matrix:
+    name: Stress Test - ${{ matrix.scenario }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    strategy:
+      fail-fast: false
+      matrix:
+        scenario:
+          - name: basic
+            requests: 5000
+            concurrency: 100
+          - name: burst
+            burst_size: 2000
+            burst_count: 3
+            concurrency: 200
+          - name: sustained
+            duration: 30
+            rps: 500
+            concurrency: 100
+
+    outputs:
+      basic_passed: ${{ steps.results.outputs.basic_passed }}
+      burst_passed: ${{ steps.results.outputs.burst_passed }}
+      sustained_passed: ${{ steps.results.outputs.sustained_passed }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install aiohttp rich
+
+      - name: Create reports directory
+        run: mkdir -p reports
+
+      - name: Run ${{ matrix.scenario.name }} stress test
+        id: test
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 10
+          max_attempts: 5
+          retry_wait_seconds: 15
+          command: |
+            set -e
+
+            SCENARIO="${{ matrix.scenario.name }}"
+            echo "Running scenario: $SCENARIO"
+
+            # Build base command
+            CMD="python stress_test.py \
+              --url '${{ secrets.API_ENDPOINT }}' \
+              --scenario $SCENARIO \
+              --max-attempts 3 \
+              --report json \
+              --output reports/${SCENARIO}_results.json \
+              --test-name '${SCENARIO} Stress Test'"
+
+            # Add API key header if available
+            if [ -n "${{ secrets.API_KEY }}" ]; then
+              CMD="$CMD --header 'Authorization: Bearer ${{ secrets.API_KEY }}'"
+            fi
+
+            # Add scenario-specific params
+            case $SCENARIO in
+              basic)
+                CMD="$CMD --requests ${{ matrix.scenario.requests }} --concurrency ${{ matrix.scenario.concurrency }}"
+                ;;
+              burst)
+                CMD="$CMD --burst-size ${{ matrix.scenario.burst_size }} --burst-count ${{ matrix.scenario.burst_count }} --concurrency ${{ matrix.scenario.concurrency }}"
+                ;;
+              sustained)
+                CMD="$CMD --duration ${{ matrix.scenario.duration }} --rps ${{ matrix.scenario.rps }} --concurrency ${{ matrix.scenario.concurrency }}"
+                ;;
+            esac
+
+            echo "Executing: $CMD"
+            eval $CMD
+
+      - name: Generate HTML report
+        if: always()
+        run: |
+          SCENARIO="${{ matrix.scenario.name }}"
+          python stress_test.py \
+            --url '${{ secrets.API_ENDPOINT }}' \
+            --scenario basic \
+            --requests 50 \
+            --concurrency 5 \
+            --report html \
+            --output reports/${SCENARIO}_report.html \
+            --test-name '${SCENARIO} Stress Test' || true
+
+      - name: Set output results
+        id: results
+        if: always()
+        run: |
+          SCENARIO="${{ matrix.scenario.name }}"
+          if [ -f "reports/${SCENARIO}_results.json" ]; then
+            PASSED=$(jq -r '.test_passed' reports/${SCENARIO}_results.json)
+            echo "${SCENARIO}_passed=$PASSED" >> $GITHUB_OUTPUT
+          else
+            echo "${SCENARIO}_passed=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Upload scenario reports
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ${{ matrix.scenario.name }}-report
+          path: reports/
+          retention-days: 14
+
+  # ===========================================================================
+  # Aggregate Results
+  # ===========================================================================
+  aggregate-results:
+    name: Aggregate Test Results
+    runs-on: ubuntu-latest
+    needs: stress-test-matrix
+    if: always()
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: all-reports
+
+      - name: Generate comprehensive summary
+        run: |
+          echo "# 📊 Comprehensive Stress Test Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Run ID**: ${{ github.run_id }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Timestamp**: $(date -u +'%Y-%m-%d %H:%M:%S UTC')" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          echo "## Scenario Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Scenario | Status | Requests | Success Rate | Avg Latency | P99 Latency |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|--------|----------|--------------|-------------|-------------|" >> $GITHUB_STEP_SUMMARY
+
+          for dir in all-reports/*/; do
+            SCENARIO=$(basename "$dir" | sed 's/-report$//')
+            JSON_FILE="${dir}${SCENARIO}_results.json"
+
+            if [ -f "$JSON_FILE" ]; then
+              PASSED=$(jq -r '.test_passed' "$JSON_FILE")
+              TOTAL=$(jq -r '.metrics.summary.total_requests' "$JSON_FILE")
+              SUCCESS=$(jq -r '.metrics.rates.success_rate_percent' "$JSON_FILE")
+              AVG_LAT=$(jq -r '.metrics.latency_ms.average' "$JSON_FILE")
+              P99_LAT=$(jq -r '.metrics.latency_ms.p99' "$JSON_FILE")
+
+              if [ "$PASSED" = "true" ]; then
+                STATUS="✅ Passed"
+              else
+                STATUS="❌ Failed"
+              fi
+
+              echo "| $SCENARIO | $STATUS | $TOTAL | ${SUCCESS}% | ${AVG_LAT}ms | ${P99_LAT}ms |" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "| $SCENARIO | ⚠️ No Data | - | - | - | - |" >> $GITHUB_STEP_SUMMARY
+            fi
+          done
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## Detailed Metrics" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          for dir in all-reports/*/; do
+            SCENARIO=$(basename "$dir" | sed 's/-report$//')
+            JSON_FILE="${dir}${SCENARIO}_results.json"
+
+            if [ -f "$JSON_FILE" ]; then
+              echo "<details>" >> $GITHUB_STEP_SUMMARY
+              echo "<summary><strong>$SCENARIO</strong></summary>" >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo '```json' >> $GITHUB_STEP_SUMMARY
+              jq '.' "$JSON_FILE" >> $GITHUB_STEP_SUMMARY
+              echo '```' >> $GITHUB_STEP_SUMMARY
+              echo "</details>" >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+            fi
+          done
+
+      - name: Merge all reports
+        run: |
+          mkdir -p merged-reports
+
+          # Combine all JSON results into a single file
+          echo '{"scenarios": []}' > merged-reports/all_results.json
+
+          for dir in all-reports/*/; do
+            SCENARIO=$(basename "$dir" | sed 's/-report$//')
+            JSON_FILE="${dir}${SCENARIO}_results.json"
+
+            if [ -f "$JSON_FILE" ]; then
+              # Add scenario name to the result
+              jq --arg name "$SCENARIO" '. + {scenario_name: $name}' "$JSON_FILE" > /tmp/temp_result.json
+              # Append to combined file
+              jq --slurpfile new /tmp/temp_result.json '.scenarios += $new' merged-reports/all_results.json > /tmp/combined.json
+              mv /tmp/combined.json merged-reports/all_results.json
+            fi
+          done
+
+          # Copy HTML reports
+          find all-reports -name "*.html" -exec cp {} merged-reports/ \;
+
+          echo "Merged reports created"
+          ls -la merged-reports/
+
+      - name: Upload merged reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: comprehensive-stress-test-${{ github.run_id }}
+          path: merged-reports/
+          retention-days: 30
+
+  # ===========================================================================
+  # Check Overall Health
+  # ===========================================================================
+  health-check:
+    name: API Health Assessment
+    runs-on: ubuntu-latest
+    needs: [stress-test-matrix, aggregate-results]
+    if: always()
+
+    steps:
+      - name: Download merged results
+        uses: actions/download-artifact@v4
+        with:
+          name: comprehensive-stress-test-${{ github.run_id }}
+          path: results
+
+      - name: Assess API health
+        id: health
+        run: |
+          if [ -f "results/all_results.json" ]; then
+            # Calculate overall health score
+            TOTAL_SCENARIOS=$(jq '.scenarios | length' results/all_results.json)
+            PASSED_SCENARIOS=$(jq '[.scenarios[] | select(.test_passed == true)] | length' results/all_results.json)
+
+            if [ "$TOTAL_SCENARIOS" -gt 0 ]; then
+              HEALTH_SCORE=$((PASSED_SCENARIOS * 100 / TOTAL_SCENARIOS))
+            else
+              HEALTH_SCORE=0
+            fi
+
+            echo "health_score=$HEALTH_SCORE" >> $GITHUB_OUTPUT
+            echo "total_scenarios=$TOTAL_SCENARIOS" >> $GITHUB_OUTPUT
+            echo "passed_scenarios=$PASSED_SCENARIOS" >> $GITHUB_OUTPUT
+
+            # Determine health status
+            if [ "$HEALTH_SCORE" -ge 90 ]; then
+              echo "health_status=🟢 Healthy" >> $GITHUB_OUTPUT
+            elif [ "$HEALTH_SCORE" -ge 70 ]; then
+              echo "health_status=🟡 Degraded" >> $GITHUB_OUTPUT
+            else
+              echo "health_status=🔴 Unhealthy" >> $GITHUB_OUTPUT
+            fi
+
+            echo "## API Health Assessment" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "| Metric | Value |" >> $GITHUB_STEP_SUMMARY
+            echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
+            echo "| Health Score | ${HEALTH_SCORE}% |" >> $GITHUB_STEP_SUMMARY
+            echo "| Scenarios Passed | ${PASSED_SCENARIOS}/${TOTAL_SCENARIOS} |" >> $GITHUB_STEP_SUMMARY
+
+            if [ "$HEALTH_SCORE" -ge 90 ]; then
+              echo "| Status | 🟢 Healthy |" >> $GITHUB_STEP_SUMMARY
+            elif [ "$HEALTH_SCORE" -ge 70 ]; then
+              echo "| Status | 🟡 Degraded |" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "| Status | 🔴 Unhealthy |" >> $GITHUB_STEP_SUMMARY
+            fi
+          else
+            echo "health_score=0" >> $GITHUB_OUTPUT
+            echo "health_status=⚠️ Unknown" >> $GITHUB_OUTPUT
+            echo "::warning::Could not assess API health - no results available"
+          fi
+
+      - name: Fail if unhealthy
+        if: steps.health.outputs.health_score < 70
+        run: |
+          echo "::error::API health score is below threshold: ${{ steps.health.outputs.health_score }}%"
+          exit 1

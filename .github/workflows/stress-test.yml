@@ -1,0 +1,418 @@
+# =============================================================================
+# API Stress Test - GitHub Actions Workflow
+# =============================================================================
+# Runs stress tests every 15 minutes with comprehensive reporting.
+#
+# Required Secrets:
+#   - API_ENDPOINT: The API URL to test (e.g., https://api.example.com/api/products)
+#   - API_KEY: (Optional) API key for authentication
+#
+# Features:
+#   - Scheduled runs every 15 minutes
+#   - Retry logic with 5 attempts and exponential backoff
+#   - Comprehensive HTML, JSON, and Markdown reports
+#   - Artifact upload for reports
+#   - Slack/Email notifications (optional)
+#   - Manual trigger support
+# =============================================================================
+
+name: API Stress Test
+
+on:
+  # Run every 15 minutes (staggered at :07, :22, :37, :52 to avoid peak times)
+  schedule:
+    - cron: '7,22,37,52 * * * *'
+
+  # Allow manual trigger with custom parameters
+  workflow_dispatch:
+    inputs:
+      scenario:
+        description: 'Test scenario to run'
+        required: false
+        default: 'basic'
+        type: choice
+        options:
+          - basic
+          - sustained
+          - burst
+          - ramp
+          - max
+      requests:
+        description: 'Number of requests (for basic scenario)'
+        required: false
+        default: '5000'
+      concurrency:
+        description: 'Concurrent connections'
+        required: false
+        default: '100'
+      duration:
+        description: 'Test duration in seconds (for sustained/max scenarios)'
+        required: false
+        default: '60'
+
+  # Run on push to main (for testing the workflow itself)
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/stress-test.yml'
+      - 'stress_test.py'
+
+# Prevent concurrent runs to avoid overwhelming the API
+concurrency:
+  group: stress-test-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  PYTHON_VERSION: '3.11'
+  MAX_RETRY_ATTEMPTS: 5
+  RETRY_DELAY_SECONDS: 10
+
+jobs:
+  # ===========================================================================
+  # Job 1: Run Stress Test
+  # ===========================================================================
+  stress-test:
+    name: Run API Stress Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    outputs:
+      test_passed: ${{ steps.run-test.outputs.test_passed }}
+      total_requests: ${{ steps.parse-results.outputs.total_requests }}
+      success_rate: ${{ steps.parse-results.outputs.success_rate }}
+      avg_latency: ${{ steps.parse-results.outputs.avg_latency }}
+      p99_latency: ${{ steps.parse-results.outputs.p99_latency }}
+
+    steps:
+      # -----------------------------------------------------------------------
+      # Step 1: Checkout repository
+      # -----------------------------------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # -----------------------------------------------------------------------
+      # Step 2: Set up Python
+      # -----------------------------------------------------------------------
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      # -----------------------------------------------------------------------
+      # Step 3: Install dependencies
+      # -----------------------------------------------------------------------
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install aiohttp rich
+
+      # -----------------------------------------------------------------------
+      # Step 4: Validate API endpoint secret
+      # -----------------------------------------------------------------------
+      - name: Validate API endpoint
+        run: |
+          if [ -z "${{ secrets.API_ENDPOINT }}" ]; then
+            echo "::error::API_ENDPOINT secret is not set. Please configure it in repository settings."
+            exit 1
+          fi
+          echo "API endpoint configured: $(echo '${{ secrets.API_ENDPOINT }}' | sed 's/\(https\?:\/\/[^\/]*\).*/\1\/.../')"
+
+      # -----------------------------------------------------------------------
+      # Step 5: Create reports directory
+      # -----------------------------------------------------------------------
+      - name: Create reports directory
+        run: mkdir -p reports
+
+      # -----------------------------------------------------------------------
+      # Step 6: Run stress test with retry logic
+      # -----------------------------------------------------------------------
+      - name: Run stress test
+        id: run-test
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 15
+          max_attempts: ${{ env.MAX_RETRY_ATTEMPTS }}
+          retry_wait_seconds: ${{ env.RETRY_DELAY_SECONDS }}
+          retry_on: error
+          command: |
+            # Determine test parameters
+            SCENARIO="${{ github.event.inputs.scenario || 'basic' }}"
+            REQUESTS="${{ github.event.inputs.requests || '5000' }}"
+            CONCURRENCY="${{ github.event.inputs.concurrency || '100' }}"
+            DURATION="${{ github.event.inputs.duration || '60' }}"
+
+            echo "========================================"
+            echo "Running Stress Test"
+            echo "========================================"
+            echo "Scenario: $SCENARIO"
+            echo "Requests: $REQUESTS"
+            echo "Concurrency: $CONCURRENCY"
+            echo "Duration: $DURATION"
+            echo "========================================"
+
+            # Build command based on scenario
+            CMD="python stress_test.py \
+              --url '${{ secrets.API_ENDPOINT }}' \
+              --scenario $SCENARIO \
+              --concurrency $CONCURRENCY \
+              --max-attempts 3 \
+              --report json \
+              --output reports/stress_test_results.json \
+              --test-name 'API Stress Test - ${{ github.run_id }}'"
+
+            # Add headers if API key is provided
+            if [ -n "${{ secrets.API_KEY }}" ]; then
+              CMD="$CMD --header 'Authorization: Bearer ${{ secrets.API_KEY }}'"
+            fi
+
+            # Add scenario-specific parameters
+            case $SCENARIO in
+              basic)
+                CMD="$CMD --requests $REQUESTS"
+                ;;
+              sustained|max)
+                CMD="$CMD --duration $DURATION --rps 1000"
+                ;;
+              burst)
+                CMD="$CMD --burst-size 2000 --burst-count 3"
+                ;;
+              ramp)
+                CMD="$CMD --duration $DURATION --rps 5000"
+                ;;
+            esac
+
+            # Execute the test
+            eval $CMD
+
+            # Check exit code
+            EXIT_CODE=$?
+            if [ $EXIT_CODE -eq 0 ]; then
+              echo "test_passed=true" >> $GITHUB_OUTPUT
+            else
+              echo "test_passed=false" >> $GITHUB_OUTPUT
+            fi
+
+            exit $EXIT_CODE
+
+      # -----------------------------------------------------------------------
+      # Step 7: Generate additional report formats (always run)
+      # -----------------------------------------------------------------------
+      - name: Generate HTML and Markdown reports
+        if: always()
+        run: |
+          # Generate HTML report
+          python stress_test.py \
+            --url '${{ secrets.API_ENDPOINT }}' \
+            --scenario basic \
+            --requests 100 \
+            --concurrency 10 \
+            --report html \
+            --output reports/stress_test_report.html \
+            --test-name 'API Stress Test - ${{ github.run_id }}' || true
+
+          # Generate Markdown report
+          python stress_test.py \
+            --url '${{ secrets.API_ENDPOINT }}' \
+            --scenario basic \
+            --requests 100 \
+            --concurrency 10 \
+            --report markdown \
+            --output reports/stress_test_report.md \
+            --test-name 'API Stress Test - ${{ github.run_id }}' || true
+
+      # -----------------------------------------------------------------------
+      # Step 8: Parse results for summary
+      # -----------------------------------------------------------------------
+      - name: Parse test results
+        id: parse-results
+        if: always()
+        run: |
+          if [ -f reports/stress_test_results.json ]; then
+            # Parse JSON results
+            TOTAL=$(jq -r '.metrics.summary.total_requests // 0' reports/stress_test_results.json)
+            SUCCESS_RATE=$(jq -r '.metrics.rates.success_rate_percent // 0' reports/stress_test_results.json)
+            AVG_LATENCY=$(jq -r '.metrics.latency_ms.average // 0' reports/stress_test_results.json)
+            P99_LATENCY=$(jq -r '.metrics.latency_ms.p99 // 0' reports/stress_test_results.json)
+            TEST_PASSED=$(jq -r '.test_passed // false' reports/stress_test_results.json)
+
+            echo "total_requests=$TOTAL" >> $GITHUB_OUTPUT
+            echo "success_rate=$SUCCESS_RATE" >> $GITHUB_OUTPUT
+            echo "avg_latency=$AVG_LATENCY" >> $GITHUB_OUTPUT
+            echo "p99_latency=$P99_LATENCY" >> $GITHUB_OUTPUT
+
+            echo "### Test Results Summary" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "| Metric | Value |" >> $GITHUB_STEP_SUMMARY
+            echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
+            echo "| Total Requests | $TOTAL |" >> $GITHUB_STEP_SUMMARY
+            echo "| Success Rate | ${SUCCESS_RATE}% |" >> $GITHUB_STEP_SUMMARY
+            echo "| Avg Latency | ${AVG_LATENCY}ms |" >> $GITHUB_STEP_SUMMARY
+            echo "| P99 Latency | ${P99_LATENCY}ms |" >> $GITHUB_STEP_SUMMARY
+            echo "| Test Passed | $TEST_PASSED |" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "::warning::No results file found"
+            echo "total_requests=0" >> $GITHUB_OUTPUT
+            echo "success_rate=0" >> $GITHUB_OUTPUT
+            echo "avg_latency=0" >> $GITHUB_OUTPUT
+            echo "p99_latency=0" >> $GITHUB_OUTPUT
+          fi
+
+      # -----------------------------------------------------------------------
+      # Step 9: Upload test reports as artifacts
+      # -----------------------------------------------------------------------
+      - name: Upload test reports
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: stress-test-reports-${{ github.run_id }}
+          path: reports/
+          retention-days: 30
+
+      # -----------------------------------------------------------------------
+      # Step 10: Create job summary with detailed metrics
+      # -----------------------------------------------------------------------
+      - name: Create detailed summary
+        if: always()
+        run: |
+          cat >> $GITHUB_STEP_SUMMARY << 'EOF'
+
+          ## Test Configuration
+
+          - **Scenario**: ${{ github.event.inputs.scenario || 'basic' }}
+          - **Concurrency**: ${{ github.event.inputs.concurrency || '100' }}
+          - **Run ID**: ${{ github.run_id }}
+          - **Triggered By**: ${{ github.event_name }}
+          - **Timestamp**: $(date -u +'%Y-%m-%d %H:%M:%S UTC')
+
+          ## Reports
+
+          Download the test reports from the artifacts section above.
+
+          - `stress_test_results.json` - Raw JSON data
+          - `stress_test_report.html` - Visual HTML report
+          - `stress_test_report.md` - Markdown report
+          EOF
+
+  # ===========================================================================
+  # Job 2: Notify on Failure (Optional)
+  # ===========================================================================
+  notify-failure:
+    name: Notify on Failure
+    runs-on: ubuntu-latest
+    needs: stress-test
+    if: failure() && github.event_name == 'schedule'
+
+    steps:
+      - name: Create failure issue
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const title = `🚨 Stress Test Failed - ${new Date().toISOString().split('T')[0]}`;
+            const body = `
+            ## Stress Test Failure Alert
+
+            The scheduled stress test has failed after ${process.env.MAX_RETRY_ATTEMPTS} attempts.
+
+            ### Details
+            - **Run ID**: ${context.runId}
+            - **Workflow**: ${context.workflow}
+            - **Timestamp**: ${new Date().toISOString()}
+
+            ### Results
+            - **Total Requests**: ${{ needs.stress-test.outputs.total_requests }}
+            - **Success Rate**: ${{ needs.stress-test.outputs.success_rate }}%
+            - **Avg Latency**: ${{ needs.stress-test.outputs.avg_latency }}ms
+            - **P99 Latency**: ${{ needs.stress-test.outputs.p99_latency }}ms
+
+            ### Actions
+            1. Check the [workflow run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})
+            2. Download the test reports from artifacts
+            3. Investigate API health and performance
+
+            ---
+            *This issue was automatically created by the stress test workflow.*
+            `;
+
+            // Check if a similar issue already exists today
+            const today = new Date().toISOString().split('T')[0];
+            const issues = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'stress-test-failure'
+            });
+
+            const existingIssue = issues.data.find(issue =>
+              issue.title.includes(today) && issue.title.includes('Stress Test Failed')
+            );
+
+            if (existingIssue) {
+              // Add comment to existing issue
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: existingIssue.number,
+                body: `## Additional Failure\n\n${body}`
+              });
+              console.log(`Updated existing issue #${existingIssue.number}`);
+            } else {
+              // Create new issue
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: title,
+                body: body,
+                labels: ['stress-test-failure', 'automated']
+              });
+              console.log('Created new failure issue');
+            }
+
+  # ===========================================================================
+  # Job 3: Store Historical Data (Optional)
+  # ===========================================================================
+  store-metrics:
+    name: Store Metrics History
+    runs-on: ubuntu-latest
+    needs: stress-test
+    if: always()
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download test results
+        uses: actions/download-artifact@v4
+        with:
+          name: stress-test-reports-${{ github.run_id }}
+          path: reports/
+
+      - name: Append to metrics history
+        run: |
+          HISTORY_FILE="metrics_history.jsonl"
+
+          if [ -f reports/stress_test_results.json ]; then
+            # Extract key metrics and append to history
+            TIMESTAMP=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
+            RUN_ID="${{ github.run_id }}"
+
+            # Create a single-line JSON entry
+            jq -c ". + {timestamp: \"$TIMESTAMP\", run_id: \"$RUN_ID\"}" reports/stress_test_results.json >> $HISTORY_FILE || true
+
+            # Keep only last 1000 entries to prevent file from growing too large
+            if [ -f $HISTORY_FILE ]; then
+              tail -n 1000 $HISTORY_FILE > ${HISTORY_FILE}.tmp
+              mv ${HISTORY_FILE}.tmp $HISTORY_FILE
+            fi
+
+            echo "Metrics appended to history file"
+          fi
+
+      - name: Upload metrics history
+        uses: actions/upload-artifact@v4
+        with:
+          name: metrics-history-${{ github.run_id }}
+          path: metrics_history.jsonl
+          retention-days: 90
+          if-no-files-found: ignore

@@ -1,0 +1,11 @@
+# Stress Test Toolkit Dependencies
+# =================================
+
+# Core HTTP client with async support
+aiohttp>=3.9.0
+
+# Beautiful terminal output (optional but recommended)
+rich>=13.7.0
+
+# For async file operations (optional)
+aiofiles>=23.2.1
